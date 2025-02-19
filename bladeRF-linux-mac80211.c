@@ -80,7 +80,7 @@ int bladerf_tx_frame(uint8_t *data, int len, int modulation, uint64_t cookie) {
     int frame_len;
     struct bladeRF_wiphy_header_tx *bwh_t;
     struct bladerf_metadata meta;
-    memset(&meta, '0', sizeof(meta));
+    memset(&meta, 0, sizeof(meta));
 
     frame_len = len + sizeof(struct bladeRF_wiphy_header_tx);
     frame = (uint8_t *)malloc(frame_len);
@@ -119,6 +119,8 @@ int bladerf_tx_frame(uint8_t *data, int len, int modulation, uint64_t cookie) {
     if (debug_mode > 2) {
         printf("%d\n", status);
     }
+
+    free(frame);
 
     return 0;
 }
@@ -353,7 +355,7 @@ int config_bladeRF(char *dev_str) {
    req_bw = TWENTY_MHZ;
 
 
-   printf("Opening bladeRF with dev_str=%s\n", dev_str ? : "(NULL)");
+   printf("Opening bladeRF with dev_str=%s\n", dev_str ? dev_str : "(NULL)");
    status = bladerf_open(&bladeRF_dev, NULL);
    if (status != 0) {
       printf("Error opening bladeRF error=%d\n", status);
@@ -464,7 +466,7 @@ int receive_test() {
    while(1) {
       struct bladerf_metadata meta;
       struct bladeRF_wiphy_header_rx *bwh_r = (struct bladeRF_wiphy_header_rx *)data;
-      memset(&meta, '0', sizeof(meta));
+      memset(&meta, 0, sizeof(meta));
       if (!max_cnt)
          fprintf(stderr, "Awaiting first benchmark packet.");
       status = bladerf_sync_rx(bladeRF_dev, data, 1000, &meta, max_cnt ? 2500 : 0);
@@ -497,6 +499,9 @@ int receive_test() {
       lut[tmp] = 1;
       fprintf(stderr, "\r%d / %d                       \r", tmp, max_cnt);
    }
+
+   free(lut);
+   free(data);
 }
 
 void *rx_thread(void *arg) {
@@ -506,7 +511,7 @@ void *rx_thread(void *arg) {
    memset(data, 0, 4096 * 16);
    while(1) {
       struct bladerf_metadata meta;
-      memset(&meta, '0', sizeof(meta));
+      memset(&meta, 0, sizeof(meta));
       bladerf_sync_rx(bladeRF_dev, data, 1000, &meta, 0);
       struct bladeRF_wiphy_header_rx *bwh_r = (struct bladeRF_wiphy_header_rx *)data;
       int i;
@@ -559,6 +564,8 @@ void *rx_thread(void *arg) {
       }
 
    }
+
+   free(data);
 }
 
 int transmit_test(uint32_t count, int mod, int length) {
@@ -578,6 +585,7 @@ int transmit_test(uint32_t count, int mod, int length) {
          return -1;
    }
    sleep(5);
+   free(data);
    return 0;
 }
 
