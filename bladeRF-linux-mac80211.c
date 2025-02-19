@@ -311,8 +311,6 @@ int set_new_frequency(unsigned long freq) {
 }
 
 int config_bladeRF(char *dev_str) {
-    int status = 0;
-    struct bladerf_version fpga_ver;
     const int num_buffers = 4096;
     const int num_dwords_buffer = 4096; // 4096 bytes
     const int num_transfers = 16;
@@ -320,17 +318,17 @@ int config_bladeRF(char *dev_str) {
 
 #define TWENTY_MHZ (20 * 1000 * 1000)
     bladerf_sample_rate sample_rate = TWENTY_MHZ;
-    bladerf_bandwidth req_bw, actual_bw;
-    req_bw = TWENTY_MHZ;
-
+    bladerf_bandwidth req_bw = TWENTY_MHZ;
+    bladerf_bandwidth actual_bw;
 
     printf("Opening bladeRF with dev_str=%s\n", dev_str ? dev_str : "(NULL)");
-    status = bladerf_open(&bladeRF_dev, NULL);
+    int status = bladerf_open(&bladeRF_dev, NULL);
     if (status != 0) {
         printf("Error opening bladeRF error=%d\n", status);
         return status;
     }
 
+    struct bladerf_version fpga_ver;
     status = bladerf_fpga_version(bladeRF_dev, &fpga_ver);
     if (status != 0) {
         printf("Could not query FPGA version, error=%d\n", status);
@@ -406,6 +404,7 @@ int config_bladeRF(char *dev_str) {
     bladerf_set_bias_tee(bladeRF_dev, BLADERF_CHANNEL_RX(1), true);
     bladerf_set_bias_tee(bladeRF_dev, BLADERF_CHANNEL_TX(0), true);
     bladerf_set_bias_tee(bladeRF_dev, BLADERF_CHANNEL_TX(1), true);
+    // do we really need all amps enabled? separate enable/disable each of them do not work
 
     status = bladerf_set_bandwidth(bladeRF_dev, BLADERF_CHANNEL_RX(0), req_bw, &actual_bw);
     if (status != 0) {
@@ -426,20 +425,15 @@ int config_bladeRF(char *dev_str) {
 }
 
 int receive_test() {
-    uint8_t *data = malloc(4096 * 16);
-    memset(data, 0, 4096 * 16);
-    uint8_t *lut = 0;
+    void *data = calloc(16, 4096);
+    uint8_t *lut = NULL;
     uint32_t max_cnt = 0;
-    uint32_t tmp;
-    int status;
     while (1) {
-        struct bladerf_metadata meta;
-        struct bladeRF_wiphy_header_rx *bwh_r = (struct bladeRF_wiphy_header_rx *) data;
-        memset(&meta, 0, sizeof(meta));
-        if (!max_cnt)
-            fprintf(stderr, "Awaiting first benchmark packet.");
-        status = bladerf_sync_rx(bladeRF_dev, data, 1000, &meta, max_cnt ? 2500 : 0);
-        if (status == -6) {
+        struct bladerf_metadata meta = {0};
+        struct bladeRF_wiphy_header_rx *bwh_r = data;
+        if (!max_cnt) fprintf(stderr, "Awaiting first benchmark packet.");
+        int status = bladerf_sync_rx(bladeRF_dev, data, 1000, &meta, max_cnt ? 2500 : 0);
+        if (status == BLADERF_ERR_TIMEOUT) {
             int i;
             int cnt = 0;
             for (i = 0; i < max_cnt; i++) {
@@ -447,48 +441,45 @@ int receive_test() {
                     cnt++;
             }
             printf("Packet success rate: %f %%\n", 100 * ((float) cnt) / max_cnt);
+            free(data);
+            free(lut);
             return 0;
-        } else if (status) {
-            return -1;
         }
-        if (bwh_r->len - 4 < 32)
-            continue;
-        if (memcmp(data + 16, "\x12\x34\x56\x78", 4))
-            continue;
+
+        if (status) break;
+        if (bwh_r->len - 4 < 32) continue;
+        if (memcmp(data + 16, "\x12\x34\x56\x78", 4) != 0) continue;
         if (!lut) {
             max_cnt = *(uint32_t *) (data + 16 + 28);
             lut = (uint8_t *) malloc(sizeof(uint8_t) * max_cnt);
-            if (!lut)
-                return -1;
+            if (!lut) break;
             memset(lut, 0, sizeof(uint8_t) * max_cnt);
         }
-        tmp = *(uint32_t *) (data + 16 + 32);
-        if (tmp > max_cnt)
-            continue;
+        uint32_t tmp = *(uint32_t *) (data + 16 + 32);
+        if (tmp > max_cnt) continue;
         lut[tmp] = 1;
         fprintf(stderr, "\r%d / %d                       \r", tmp, max_cnt);
     }
 
     free(lut);
     free(data);
+
+    return -1;
 }
 
 void *rx_thread(void *arg) {
     bladerf_trim_dac_write(bladeRF_dev, 0x0ea8);
-    uint8_t *data = malloc(4096 * 16);
-    memset(data, 0, 4096 * 16);
+    uint8_t data[4096 * 16] = {0};
     while (1) {
-        struct bladerf_metadata meta;
-        memset(&meta, 0, sizeof(meta));
+        struct bladerf_metadata meta = {0};
         bladerf_sync_rx(bladeRF_dev, data, 1000, &meta, 0);
         struct bladeRF_wiphy_header_rx *bwh_r = (struct bladeRF_wiphy_header_rx *) data;
-        int i;
         if (debug_mode) {
             //pthread_mutex_lock(&log_mutex);
             printf("RX frame:\n");
             if (debug_mode > 2) {
                 printf("Bytes:\n");
-                for (i = 0; i < 48; i++)
+                for (int i = 0; i < 48; i++)
                     printf("%.2x ", data[i]);
             }
 
@@ -522,34 +513,28 @@ void *rx_thread(void *arg) {
             if (bwh_r->type == 1) {
                 write(tun_tap_fd, data + 16, bwh_r->len - 4);
             }
-        } else {
-            if (bwh_r->type != 1) {
-                tx_cb(netlink_sock, netlink_family, bwh_r);
-            }
-            if (bwh_r->type == 1) {
-                rx_frame(netlink_sock, netlink_family, data + 16, bwh_r->len - 4, bwh_r->modulation);
-            }
+            continue;
         }
-    }
 
-    free(data);
+        if (bwh_r->type == 1) {
+            rx_frame(netlink_sock, netlink_family, data + 16, bwh_r->len - 4, bwh_r->modulation);
+            continue;
+        }
+
+        tx_cb(netlink_sock, netlink_family, bwh_r);
+    }
 }
 
 int transmit_test(uint32_t count, int mod, int length) {
-    int i;
-    char *data;
-
-    data = (char *) malloc(length + 40);
-    memset(data, 0, length + 40);
+    void *data = calloc(1, length + 40);
     memcpy(data, "\x12\x34\x56\x78", 4);
     memset(data + 4, 0xff, 18);
     memcpy(data + 28, &count, sizeof(count));
 
     printf("Sending %d packets at %d modulation and %d bytes long:\n", count, mod, length);
-    for (i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++) {
         memcpy(data + 32, &i, sizeof(i));
-        if (bladerf_tx_frame(data, length, mod, 0xbd81))
-            return -1;
+        bladerf_tx_frame(data, length, mod, 0xbd81);
     }
     sleep(5);
     free(data);
@@ -563,12 +548,8 @@ int transmit_test(uint32_t count, int mod, int length) {
 #error Incompatible libbladeRF header version. At minimum libbladeRF version 2.4.0 is required.
 #endif
 
-int main(int argc, char *argv[])
-{
-    int status;
-    struct nl_cb *netlink_cb = NULL;
+int main(int argc, char *argv[]) {
     unsigned long freq = 0;
-    unsigned long tx_freq = 0;
     int trx_test = 0;
 #define TRX_TEST_NONE 0
 #define TRX_TEST_RX   1
@@ -651,19 +632,21 @@ int main(int argc, char *argv[])
     }
 
     if (trx_test != TRX_TEST_NONE) {
-        status = set_new_frequency(freq);
+        set_new_frequency(freq);
         force_freq = 1;
         if (trx_test == TRX_TEST_RX) {
             return receive_test();
-        } else if (trx_test == TRX_TEST_TX) {
-            if (tx_len < 32) {
-                printf("specify a packet length greater than 32 with -l\n");
-                return -1;
-            }
-            return transmit_test(tx_count, tx_mod, tx_len);
         }
+
+        if (tx_len < 32) {
+            printf("specify a packet length greater than 32 with -l\n");
+            return -1;
+        }
+
+        return transmit_test(tx_count, tx_mod, tx_len);
     }
 
+    int status;
     if (freq) {
         status = set_new_frequency(freq);
         force_freq = 1;
@@ -675,27 +658,21 @@ int main(int argc, char *argv[])
         printf("Could not set frequency\n");
         return -1;
     }
-    if (tun_tap) {
-        return start_tun_tap(argv[0]);
-    } else {
-        return start_mac80211(argv[0]);
-    }
+
+    if (tun_tap) return start_tun_tap(argv[0]);
+    return start_mac80211(argv[0]);
+
 }
 
 int start_mac80211(char *cmd) {
-    int status;
-    struct nl_cb *netlink_cb = NULL;
-    void *ret_ptr = NULL;
-
     netlink_sock = nl_socket_alloc();
-    if (!netlink_sock) {
+    if (netlink_sock == NULL) {
         printf("nl_socket_alloc() failed\n");
         return -1;
     }
 
-
     /* connect netlink socket to generic netlink family MAC80211_HWSIM */
-    status = genl_connect(netlink_sock);
+    int status = genl_connect(netlink_sock);
     if (status) {
         printf("genl_connect() failed with error=%d\n", status);
         return -1;
@@ -708,9 +685,8 @@ int start_mac80211(char *cmd) {
         return -1;
     }
 
-
     /* create and set netlink_frame_callback as netlink callback */
-    netlink_cb = nl_cb_alloc(NL_CB_DEFAULT);
+    struct nl_cb *netlink_cb = nl_cb_alloc(NL_CB_DEFAULT);
     if (!netlink_cb) {
         printf("nl_cb_alloc() failed\n");
         return -1;
@@ -726,26 +702,24 @@ int start_mac80211(char *cmd) {
     /* send HWSIM_CMD_REGISTER generic netlink message */
     struct nl_msg *netlink_msg = NULL;
     netlink_msg = nlmsg_alloc();
-    ret_ptr = genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* REGISTER */ 1, 0);
-    if (!ret_ptr) {
+    void *ret_ptr = genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* REGISTER */ 1, 0);
+    if (ret_ptr == NULL) {
         printf("genlmsg_put() failed\n");
         return -1;
     }
 
     status = nl_send_auto(netlink_sock, netlink_msg);
+    nlmsg_free(netlink_msg);
     if (status < 0) {
         printf("nl_send_auto() failed with error=%d\n", status);
         return -1;
     }
-    nlmsg_free(netlink_msg);
 
     printf("netlink registration complete\n");
 
     pthread_t rx_th;
     pthread_create(&rx_th, NULL, rx_thread, NULL);
 
-
-    int i = 0;
     /* receive and dispatch netlink messages */
     while (1) {
         status = nl_recvmsgs(netlink_sock, netlink_cb);
@@ -764,26 +738,21 @@ int start_mac80211(char *cmd) {
 }
 
 int start_tun_tap(char *cmd) {
-    int status;
-    struct ifreq ifreq;
-    uint8_t payload_data[4096];
-    pthread_t rx_th;
-
     tun_tap_fd = open("/dev/net/tun", O_RDWR);
     if (tun_tap == -EPERM) {
         printf("attain CAP_NET_ADMIN via `sudo setcap cap_net_admin+eip %s` "
                "or start again with sudo\n", cmd);
         return -1;
-    } else if (tun_tap == -ENOENT) {
+    }
+
+    if (tun_tap == -ENOENT) {
         printf("start_tun_tap() failed with error=%d\n", netlink_family);
         printf("perhaps tun.ko isn't loaded?\n");
     }
 
-    memset(&ifreq, 0, sizeof(ifreq));
-    ifreq.ifr_flags = IFF_TAP | IFF_NO_PI;
+    struct ifreq ifreq = {.ifr_flags = IFF_TAP | IFF_NO_PI};
     strncpy(ifreq.ifr_name, "bladelan", IFNAMSIZ);
-    status = ioctl(tun_tap_fd, TUNSETIFF, &ifreq);
-
+    int status = ioctl(tun_tap_fd, TUNSETIFF, &ifreq);
     if (status) {
         printf("could not ioctl(TUNSETIFF), error=%d\n", status);
         close(tun_tap_fd);
@@ -792,25 +761,24 @@ int start_tun_tap(char *cmd) {
 
     printf("Registered `%s' TAP interface\n", ifreq.ifr_name);
 
+    pthread_t rx_th;
     pthread_create(&rx_th, NULL, rx_thread, NULL);
 
     while (1) {
-        status = read(tun_tap_fd, payload_data, 4096);
-        if (status < 0) {
+        uint8_t payload_data[4096];
+        ssize_t got = read(tun_tap_fd, payload_data, sizeof(payload_data));
+        if (got < 0) {
             return -1;
         }
 
         if (debug_mode) {
             printf("TAP TX frame:\n");
             printf("\tMod: %d\n", tx_mod);
-            dump_packet(payload_data, status);
+            dump_packet(payload_data, (int) got);
             printf("\n\n");
         }
 
-        status = bladerf_tx_frame(payload_data, status, tx_mod, 0);
-        if (status < 0) {
-            return -1;
-        }
+        bladerf_tx_frame(payload_data, (int) got, tx_mod, 0);
     }
 
     return 0;
