@@ -74,13 +74,11 @@ int start_tun_tap(char *cmd);
 unsigned int bytes_to_dwords(int bytes) {
     return (bytes + 3) / 4;
 }
-int bladerf_tx_frame(uint8_t *data, int len, int modulation, uint64_t cookie) {
-    struct bladeRF_wiphy_header_tx *bwh_t;
 
+int bladerf_tx_frame(uint8_t *data, int len, int modulation, uint64_t cookie) {
     int frame_len = len + sizeof(struct bladeRF_wiphy_header_tx);
-    uint8_t *frame = (uint8_t *) malloc(frame_len);
-    bwh_t = (struct bladeRF_wiphy_header_tx *)frame;
-    memset(frame, 0, frame_len);
+    void *frame = calloc(1, frame_len);
+    struct bladeRF_wiphy_header_tx *bwh_t = frame;
     memcpy(frame + sizeof(struct bladeRF_wiphy_header_tx), data, len);
 
     //char msg[] = "\x55\x66\x00\x00" "\x07\x00\x02\x00" "\x0a\x00\x9a\x00" "\x00\x00\x00\x00" ;
@@ -138,106 +136,78 @@ void dump_packet(uint8_t *payload_data, int payload_len) {
 
 
 int netlink_frame_callback(struct nl_msg *netlink_message, void *arg) {
-    /* netlink variables */
-    struct nlmsghdr *netlink_header = NULL;
-    struct genlmsghdr *genlink_header = NULL;
-
-    struct nlattr *genlink_attribute_head = NULL;
-    int genlink_attribute_len = 0;
-
     struct nlattr *attribute_table[25 /* MAX */ + 1];
-
-    /* frame variables */
-    uint8_t *payload_data;
-    int payload_len;
-    int i;
-    uint64_t cookie;
-    uint32_t frequency;
-    uint32_t flags;
-    uint8_t *mac;
-    uint8_t frame_type;
-
-    struct tx_rate *tx_rate;
-    int tx_rate_len;
-    struct tx_rate_info *tx_rate_info;
-    int tx_rate_info_len;
-
-    netlink_header = nlmsg_hdr(netlink_message);
-    genlink_header = genlmsg_hdr(netlink_header);
+    struct nlmsghdr *netlink_header = nlmsg_hdr(netlink_message);
+    struct genlmsghdr *genlink_header = genlmsg_hdr(netlink_header);
 
     if (genlink_header->cmd != 2 /* FRAME */ && genlink_header->cmd != 7 /* FREQ */) {
         return 0;
     }
 
     /* parse attributes into table */
-    genlink_attribute_len = genlmsg_attrlen(genlink_header, 0);
-    genlink_attribute_head = genlmsg_attrdata(genlink_header, 0);
-    nla_parse(attribute_table, 25 /* MAX */, genlink_attribute_head,
-              genlink_attribute_len, NULL);
+    int genlink_attribute_len = genlmsg_attrlen(genlink_header, 0);
+    struct nlattr *genlink_attribute_head = genlmsg_attrdata(genlink_header, 0);
+    nla_parse(attribute_table, 25 /* MAX */, genlink_attribute_head,  genlink_attribute_len, NULL);
 
-    frequency = nla_get_u32(attribute_table[19 /* FREQ */]);
+    uint32_t frequency = nla_get_u32(attribute_table[19 /* FREQ */]);
 
-    if (genlink_header->cmd == 2 /* FRAME */) {
-        payload_data = nla_data(attribute_table[3 /* FRAME */]);
-        payload_len = nla_len(attribute_table[3 /* FRAME */]);
-
-        mac = nla_data(attribute_table[2 /* TRANSMITTER */]);
-        cookie = nla_get_u64(attribute_table[8 /* COOKIE */]);
-        flags = nla_get_u32(attribute_table[4 /* FLAGS */]);
-
-        tx_rate = nla_data(attribute_table[7 /* TX RATE */]);
-        tx_rate_len = nla_len(attribute_table[7 /* TX RATE */]);
-
-        tx_rate_info = nla_data(attribute_table[21 /* TX RATE INFO */]);
-        tx_rate_info_len = nla_len(attribute_table[21 /* TX RATE INFO */]);
-
-        frame_type = (payload_data[0] >> 2) & 0x3;
-
-        if (debug_mode) {
-            //pthread_mutex_lock(&log_mutex);
-            printf("TX frame:\n");
-            printf("Frame cookie = %lu\n", cookie);
-            /* display center frequency of channel in MHz */
-            printf("Frequency = %d\n", frequency);
-
-            /* display MAC address of transmitter */
-            printf("TX MAC: %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n", mac[0], mac[1], mac[2],
-                   mac[3], mac[4], mac[5]);
-
-            /* display TX rate selection table */
-            printf("Rates:\n");
-            for (i = 0; i < (tx_rate_len / sizeof(struct tx_rate)); i++) {
-                if (tx_rate[i].idx == 255)
-                    break;
-                printf("   [%d] rate=%d count=%d\n", i, tx_rate[i].idx, tx_rate[i].count);
-            }
-            printf("Rate info:\n");
-            for (i = 0; i < (tx_rate_info_len / sizeof(struct tx_rate_info)); i++) {
-                if (tx_rate_info[i].idx == 0)
-                    break;
-                printf("   [%d] rate=%d rate_info=%d\n", i, tx_rate_info[i].idx, tx_rate_info[i].info);
-            }
-
-            printf("Flags: %x (tx_status_req=%d, no_ack=%d, stat_ack=%d)\n",
-                   flags, !!(flags & 1), !!(flags & 2), !!(flags & 4));
-            printf("Payload type: ");
-            if (frame_type == 0) {
-                printf("Management");
-            }
-            printf("\n");
-
-            dump_packet(payload_data, payload_len);
-            printf("\n\n\n");
-            //pthread_mutex_unlock(&log_mutex);
-        }
-
-        return bladerf_tx_frame(payload_data, payload_len, tx_rate[0].idx, cookie);
-    } else if (genlink_header->cmd == 7 /* FRAME */) {
+    if (genlink_header->cmd == 7 /* FRAME */) {
         set_new_frequency(frequency);
         updated_freq = 1;
+
+        return 0;
     }
 
-    return 0;
+    uint8_t *payload_data = nla_data(attribute_table[3 /* FRAME */]);
+    int payload_len = nla_len(attribute_table[3 /* FRAME */]);
+    struct tx_rate *tx_rate = nla_data(attribute_table[7 /* TX RATE */]);
+    uint64_t cookie = nla_get_u64(attribute_table[8 /* COOKIE */]);
+
+    if (debug_mode) {
+        uint8_t *mac = nla_data(attribute_table[2 /* TRANSMITTER */]);
+        uint32_t flags = nla_get_u32(attribute_table[4 /* FLAGS */]);
+        int tx_rate_len = nla_len(attribute_table[7 /* TX RATE */]);
+        struct tx_rate_info *tx_rate_info = nla_data(attribute_table[21 /* TX RATE INFO */]);
+        int tx_rate_info_len = nla_len(attribute_table[21 /* TX RATE INFO */]);
+        uint8_t frame_type = (payload_data[0] >> 2) & 0x3;
+        //pthread_mutex_lock(&log_mutex);
+        printf("TX frame:\n");
+        printf("Frame cookie = %lu\n", cookie);
+        /* display center frequency of channel in MHz */
+        printf("Frequency = %d\n", frequency);
+
+        /* display MAC address of transmitter */
+        printf("TX MAC: %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n", mac[0], mac[1], mac[2],
+               mac[3], mac[4], mac[5]);
+
+        /* display TX rate selection table */
+        printf("Rates:\n");
+        for (int i = 0; i < (tx_rate_len / sizeof(struct tx_rate)); i++) {
+            if (tx_rate[i].idx == 255)
+                break;
+            printf("   [%d] rate=%d count=%d\n", i, tx_rate[i].idx, tx_rate[i].count);
+        }
+        printf("Rate info:\n");
+        for (int i = 0; i < (tx_rate_info_len / sizeof(struct tx_rate_info)); i++) {
+            if (tx_rate_info[i].idx == 0)
+                break;
+            printf("   [%d] rate=%d rate_info=%d\n", i, tx_rate_info[i].idx, tx_rate_info[i].info);
+        }
+
+        printf("Flags: %x (tx_status_req=%d, no_ack=%d, stat_ack=%d)\n",
+               flags, !!(flags & 1), !!(flags & 2), !!(flags & 4));
+        printf("Payload type: ");
+        if (frame_type == 0) {
+            printf("Management");
+        }
+        printf("\n");
+
+        dump_packet(payload_data, payload_len);
+        printf("\n\n\n");
+        //pthread_mutex_unlock(&log_mutex);
+    }
+
+    return bladerf_tx_frame(payload_data, payload_len, tx_rate[0].idx, cookie);
 }
 
 int tx_cb(struct nl_sock *netlink_sock, int netlink_family, struct bladeRF_wiphy_header_rx *bwh_r) {
