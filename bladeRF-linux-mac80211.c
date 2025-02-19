@@ -76,7 +76,7 @@ unsigned int bytes_to_dwords(int bytes) {
 }
 
 int bladerf_tx_frame(uint8_t *data, int len, int modulation, uint64_t cookie) {
-    int frame_len = len + sizeof(struct bladeRF_wiphy_header_tx);
+    int frame_len = len + (int) sizeof(struct bladeRF_wiphy_header_tx);
     void *frame = calloc(1, frame_len);
     struct bladeRF_wiphy_header_tx *bwh_t = frame;
     memcpy(frame + sizeof(struct bladeRF_wiphy_header_tx), data, len);
@@ -211,55 +211,61 @@ int netlink_frame_callback(struct nl_msg *netlink_message, void *arg) {
 }
 
 int tx_cb(struct nl_sock *netlink_sock, int netlink_family, struct bladeRF_wiphy_header_rx *bwh_r) {
-    int status = 0;
-    void *ret_ptr = NULL;
-    struct nl_msg *netlink_msg = NULL;
-    netlink_msg = nlmsg_alloc();
-    ret_ptr = genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* TX INFO */ 3, 0);
+    if (bwh_r == NULL) return -1;
+    struct nl_msg *netlink_msg = nlmsg_alloc();
+    if (netlink_msg == NULL) {
+        printf("Failed to allocate netlink message\n");
+        return -1;
+    }
+
+    genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* TX INFO */ 3, 0);
     nla_put(netlink_msg, 2 /* TRANSMITTER */, 6, "\x42\x00\x00\x00\x00\x00");
     nla_put_u32(netlink_msg, 4 /* FLAGS */, /* ACK */ bwh_r->type == 2 ? 4 : 0);
-    struct tx_rate tr[4];
-    memset(&tr, 0, sizeof(tr));
+    struct tx_rate tr[4] = {0};
     tr[0].idx = bwh_r->modulation;
     tr[0].count = 1;
     nla_put_u32(netlink_msg, 6 /* SIGNAL */, -30);
     nla_put(netlink_msg, 7 /* RATE */, sizeof(tr), &tr);
     nla_put_u64(netlink_msg, 8 /* COOKIE */, bwh_r->cookie);
 
-    status = nl_send_auto(netlink_sock, netlink_msg);
+    int status = nl_send_auto(netlink_sock, netlink_msg);
+    nlmsg_free(netlink_msg);
     if (status < 0) {
         printf("nl_send_auto() failed with error=%d\n", status);
         return -1;
     }
-    nlmsg_free(netlink_msg);
+
     return 0;
 }
 
 int rx_frame(struct nl_sock *netlink_sock, int netlink_family, uint8_t *ptr, int len, int mod) {
-    int status = 0;
-    void *ret_ptr = NULL;
-    struct nl_msg *netlink_msg = NULL;
-    int band_rate_modifier = (local_freq > 2500) ? 0 : 4;
+    if (ptr == NULL) return -1;
+    struct nl_msg *netlink_msg = nlmsg_alloc();
+    if (netlink_msg == NULL) {
+        printf("Failed to allocate netlink message\n");
+        return -1;
+    }
 
-    netlink_msg = nlmsg_alloc();
-    ret_ptr = genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* FRAME */ 2, 0);
+    void *ret_ptr = genlmsg_put(netlink_msg, NL_AUTO_PORT, NL_AUTO_SEQ, netlink_family, 0, 0, /* FRAME */ 2, 0);
     if (!ret_ptr) {
         printf("genlmsg_put() failed\n");
         return -1;
     }
     nla_put(netlink_msg, 1 /* RECEIVER */, 6, "\x42\x00\x00\x00\x00\x00");
     nla_put(netlink_msg, 3 /* FRAME */, len, ptr);
+    int band_rate_modifier = (local_freq > 2500) ? 0 : 4;
     nla_put_u32(netlink_msg, 5 /* RX RATE */, mod + band_rate_modifier);
     nla_put_u32(netlink_msg, 6 /* SIGNAL */, -50);
     if (!force_freq && updated_freq)
         nla_put_u32(netlink_msg, 19 /* FREQ */, local_freq);
 
-    status = nl_send_auto(netlink_sock, netlink_msg);
+    int status = nl_send_auto(netlink_sock, netlink_msg);
+    nlmsg_free(netlink_msg);
     if (status < 0) {
         printf("nl_send_auto() failed with error=%d\n", status);
         return -1;
     }
-    nlmsg_free(netlink_msg);
+
     return 0;
 }
 
